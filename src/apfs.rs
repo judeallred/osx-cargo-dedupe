@@ -35,7 +35,7 @@ fn check(rc: libc::c_int) -> io::Result<()> {
 /// Two files with the same `Shared` value are full clones of each other and
 /// deduplicating them again would save nothing.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum BlockSet {
+pub(crate) enum BlockSet {
     Shared { dev: u64, clone_id: u64 },
     Private { dev: u64, ino: u64 },
 }
@@ -44,7 +44,7 @@ pub enum BlockSet {
 ///
 /// Files that only share some of their blocks, or whose clone information is
 /// unavailable, are treated as private.
-pub fn block_set(path: &Path, dev: u64, ino: u64) -> BlockSet {
+pub(crate) fn block_set(path: &Path, dev: u64, ino: u64) -> BlockSet {
     match clone_info(path) {
         Some((clone_id, ext_flags)) if ext_flags & EF_SHARES_ALL_BLOCKS != 0 => {
             BlockSet::Shared { dev, clone_id }
@@ -101,7 +101,7 @@ fn clone_info(path: &Path) -> Option<(u64, u64)> {
 }
 
 /// Creates `dst` as an APFS clone of `src` with `clonefile(2)`.
-pub fn clone_file(src: &Path, dst: &Path) -> io::Result<()> {
+pub(crate) fn clone_file(src: &Path, dst: &Path) -> io::Result<()> {
     let (src, dst) = (c_path(src)?, c_path(dst)?);
     // SAFETY: both paths are NUL-terminated.
     check(unsafe {
@@ -115,7 +115,7 @@ pub fn clone_file(src: &Path, dst: &Path) -> io::Result<()> {
 
 /// Copies mode, flags, ACLs and extended attributes of `from` onto `to`
 /// with `copyfile(3)`.
-pub fn copy_metadata(from: &Path, to: &Path) -> io::Result<()> {
+pub(crate) fn copy_metadata(from: &Path, to: &Path) -> io::Result<()> {
     let (from, to) = (c_path(from)?, c_path(to)?);
     // SAFETY: both paths are NUL-terminated; a null state is allowed.
     let rc = unsafe {
@@ -134,7 +134,7 @@ pub fn copy_metadata(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 /// Sets access and modification times of `path` (without following symlinks).
-pub fn set_times(path: &Path, atime: (i64, i64), mtime: (i64, i64)) -> io::Result<()> {
+pub(crate) fn set_times(path: &Path, atime: (i64, i64), mtime: (i64, i64)) -> io::Result<()> {
     let path = c_path(path)?;
     let times = [
         libc::timespec {
@@ -159,7 +159,7 @@ pub fn set_times(path: &Path, atime: (i64, i64), mtime: (i64, i64)) -> io::Resul
 
 /// Returns whether another process holds a `flock(2)` or `fcntl(2)` lock on
 /// `path`. Unreadable files are reported as locked.
-pub fn is_locked(path: &Path) -> bool {
+pub(crate) fn is_locked(path: &Path) -> bool {
     let Ok(file) = File::open(path) else {
         return true;
     };
@@ -171,21 +171,21 @@ pub fn is_locked(path: &Path) -> bool {
     }
     // SAFETY: `flock` only contains integers, for which all-zero is valid.
     let mut lock: libc::flock = unsafe { std::mem::zeroed() };
-    lock.l_type = libc::F_WRLCK as _;
-    lock.l_whence = libc::SEEK_SET as _;
+    // Zeroed `l_whence`, `l_start` and `l_len` mean the whole file.
+    lock.l_type = libc::F_WRLCK;
     // SAFETY: `file` is open and `lock` is a valid `struct flock`.
-    let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut lock) };
-    rc != 0 || lock.l_type != libc::F_UNLCK as _
+    let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &raw mut lock) };
+    rc != 0 || lock.l_type != libc::F_UNLCK
 }
 
 /// Returns the mount point of the volume holding `path` and the bytes
 /// available on it to unprivileged users.
-pub fn volume_space(path: &Path) -> Option<(PathBuf, u64)> {
+pub(crate) fn volume_space(path: &Path) -> Option<(PathBuf, u64)> {
     let path = c_path(path).ok()?;
     // SAFETY: `statfs` only contains integers and arrays of them.
     let mut st: libc::statfs = unsafe { std::mem::zeroed() };
     // SAFETY: `path` is NUL-terminated and `st` is valid for writes.
-    if unsafe { libc::statfs(path.as_ptr(), &mut st) } != 0 {
+    if unsafe { libc::statfs(path.as_ptr(), &raw mut st) } != 0 {
         return None;
     }
     // SAFETY: the kernel NUL-terminates `f_mntonname`.

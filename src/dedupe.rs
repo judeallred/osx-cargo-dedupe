@@ -14,16 +14,16 @@ use crate::apfs::{self, BlockSet};
 use crate::scan::FileEntry;
 
 /// Files with identical contents, split by the block set backing them.
-pub struct DupGroup {
-    pub len: u64,
-    pub hash: blake3::Hash,
+pub(crate) struct DupGroup {
+    pub(crate) len: u64,
+    pub(crate) hash: blake3::Hash,
     /// Every block set holding a copy of the contents, each with its files.
-    pub sets: Vec<Vec<FileEntry>>,
+    pub(crate) sets: Vec<Vec<FileEntry>>,
 }
 
 impl DupGroup {
     /// Bytes that become shared if every set is replaced by clones of one.
-    pub fn savable(&self) -> u64 {
+    pub(crate) fn savable(&self) -> u64 {
         let replaced: usize = self.sets.iter().skip(1).map(Vec::len).sum();
         self.len * replaced as u64
     }
@@ -38,7 +38,7 @@ fn hash_file(path: &Path) -> io::Result<blake3::Hash> {
 /// Returns files whose size is shared by another file on the same volume,
 /// grouped by their block set. Groups already backed by one block set are
 /// dropped because they are already deduplicated.
-pub fn size_groups(files: Vec<FileEntry>) -> Vec<Vec<Vec<FileEntry>>> {
+pub(crate) fn size_groups(files: Vec<FileEntry>) -> Vec<Vec<Vec<FileEntry>>> {
     let mut by_size: HashMap<(u64, u64), Vec<FileEntry>> = HashMap::new();
     for file in files {
         by_size.entry((file.dev, file.len)).or_default().push(file);
@@ -61,7 +61,7 @@ pub fn size_groups(files: Vec<FileEntry>) -> Vec<Vec<Vec<FileEntry>>> {
 
 /// Hashes one file per block set and returns the groups of identical
 /// contents backed by more than one block set.
-pub fn find_duplicates(
+pub(crate) fn find_duplicates(
     size_groups: Vec<Vec<Vec<FileEntry>>>,
     pb: &ProgressBar,
     cancel: &AtomicBool,
@@ -101,7 +101,7 @@ pub fn find_duplicates(
 
 /// Why a duplicate was left alone.
 #[derive(Debug)]
-pub enum Skip {
+pub(crate) enum Skip {
     /// Changed since it was indexed.
     Changed,
     /// Modified more recently than the minimum age.
@@ -113,7 +113,7 @@ pub enum Skip {
 }
 
 /// Outcome of trying to replace one file.
-pub enum Outcome {
+pub(crate) enum Outcome {
     Replaced,
     Skipped(PathBuf, Skip),
 }
@@ -127,9 +127,9 @@ impl Drop for TempGuard<'_> {
     }
 }
 
-pub struct Replacer {
-    pub min_age: Duration,
-    pub apply: bool,
+pub(crate) struct Replacer {
+    pub(crate) min_age: Duration,
+    pub(crate) apply: bool,
 }
 
 impl Replacer {
@@ -138,7 +138,7 @@ impl Replacer {
     /// The clone is created next to `dst`, given `dst`'s metadata and
     /// timestamps (cargo's freshness checks use mtimes), verified, and then
     /// atomically renamed over `dst`. Without `apply`, only the checks run.
-    pub fn replace(&self, src: &FileEntry, dst: &FileEntry, hash: &blake3::Hash) -> Outcome {
+    pub(crate) fn replace(&self, src: &FileEntry, dst: &FileEntry, hash: &blake3::Hash) -> Outcome {
         let skip = |reason| Outcome::Skipped(dst.path.clone(), reason);
         let now = SystemTime::now();
         if !src.unchanged() || !dst.unchanged() {
@@ -153,19 +153,14 @@ impl Replacer {
         if !self.apply {
             return Outcome::Replaced;
         }
-        match self.clone_over(src, dst, hash) {
+        match Self::clone_over(src, dst, hash) {
             Ok(true) => Outcome::Replaced,
             Ok(false) => skip(Skip::Changed),
             Err(err) => skip(Skip::Error(err)),
         }
     }
 
-    fn clone_over(
-        &self,
-        src: &FileEntry,
-        dst: &FileEntry,
-        hash: &blake3::Hash,
-    ) -> io::Result<bool> {
+    fn clone_over(src: &FileEntry, dst: &FileEntry, hash: &blake3::Hash) -> io::Result<bool> {
         let name = dst.path.file_name().unwrap_or_default().to_string_lossy();
         let tmp = dst
             .path
