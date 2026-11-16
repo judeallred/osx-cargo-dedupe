@@ -73,6 +73,7 @@ struct Cli {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let started = Instant::now();
+    apfs::raise_open_file_limit();
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let roots = if cli.paths.is_empty() {
         vec![home.clone().context("HOME is not set; pass a path")?]
@@ -201,7 +202,14 @@ fn index_all(
                 return None;
             }
             pb.set_message(ui::short_path(dir));
-            let indexed = scan::index(dir, opts, now);
+            let mut indexed = scan::index(dir, opts, now);
+            // Only keep cargo's locks where files may be replaced, so open
+            // files don't pile up.
+            if let Indexed::Ready { files, locks, .. } = &mut indexed
+                && (!keep_locks || files.is_empty())
+            {
+                locks.clear();
+            }
             pb.inc(1);
             Some((dir, indexed))
         })
@@ -212,6 +220,7 @@ fn index_all(
     for (dir, indexed) in indexed {
         match indexed {
             Indexed::InUse { lock } => report.in_use.push((dir.clone(), lock)),
+            Indexed::Unreadable { path, error } => report.errors.push((path, error)),
             Indexed::Ready {
                 files: dir_files,
                 skips,
@@ -230,10 +239,7 @@ fn index_all(
                 report.incremental += skips.incremental;
                 report.small += skips.small;
                 files.extend(dir_files);
-                // A dry run doesn't need to keep builds out.
-                if keep_locks {
-                    held_locks.extend(locks);
-                }
+                held_locks.extend(locks);
             }
         }
     }
@@ -268,7 +274,8 @@ fn find_duplicates(
     pb.finish_and_clear();
     let to_hash: u64 = size_groups.iter().flatten().map(|set| set[0].len).sum();
     let pb = ui::bytes_bar(to_hash, "Hashing");
-    let groups = dedupe::find_duplicates(size_groups, &pb, cancel);
+    let (groups, errors) = dedupe::find_duplicates(size_groups, &pb, cancel);
+    report.errors.extend(errors);
     pb.finish_and_clear();
     report.groups = groups.len();
     let savable: u64 = groups.iter().map(DupGroup::savable).sum();

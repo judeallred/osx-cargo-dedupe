@@ -60,25 +60,30 @@ pub(crate) fn size_groups(files: Vec<FileEntry>) -> Vec<Vec<Vec<FileEntry>>> {
 }
 
 /// Hashes one file per block set and returns the groups of identical
-/// contents backed by more than one block set.
+/// contents backed by more than one block set, and the files that couldn't
+/// be read.
 pub(crate) fn find_duplicates(
     size_groups: Vec<Vec<Vec<FileEntry>>>,
     pb: &ProgressBar,
     cancel: &AtomicBool,
-) -> Vec<DupGroup> {
-    let hashed: Vec<(blake3::Hash, Vec<FileEntry>)> = size_groups
+) -> (Vec<DupGroup>, Vec<(PathBuf, io::Error)>) {
+    let (hashed, errors): (Vec<_>, Vec<_>) = size_groups
         .into_par_iter()
         .flatten()
-        .filter_map(|set| {
-            if cancel.load(Ordering::Relaxed) {
-                return None;
-            }
+        .filter(|_| !cancel.load(Ordering::Relaxed))
+        .map(|set| {
             // Files in one block set have identical contents; hash one.
-            let hash = hash_file(&set[0].path).ok();
+            let hash = hash_file(&set[0].path);
             pb.inc(set[0].len);
-            Some((hash?, set))
+            match hash {
+                Ok(hash) => Ok((hash, set)),
+                Err(error) => Err((set[0].path.clone(), error)),
+            }
         })
-        .collect();
+        .partition_map(|r| match r {
+            Ok(ok) => rayon::iter::Either::Left(ok),
+            Err(err) => rayon::iter::Either::Right(err),
+        });
 
     let mut by_content: HashMap<(u64, u64, blake3::Hash), Vec<Vec<FileEntry>>> = HashMap::new();
     for (hash, set) in hashed {
@@ -87,7 +92,7 @@ pub(crate) fn find_duplicates(
             .or_default()
             .push(set);
     }
-    by_content
+    let groups = by_content
         .into_iter()
         .filter(|(_, sets)| sets.len() > 1)
         .map(|((_, len, hash), mut sets)| {
@@ -96,7 +101,8 @@ pub(crate) fn find_duplicates(
             sets.sort_by_key(|set| (std::cmp::Reverse(set.len()), set[0].mtime));
             DupGroup { len, hash, sets }
         })
-        .collect()
+        .collect();
+    (groups, errors)
 }
 
 /// Why a duplicate was left alone.

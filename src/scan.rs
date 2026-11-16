@@ -1,7 +1,8 @@
 //! Finding cargo profile directories and indexing their files.
 
 use std::ffi::OsStr;
-use std::fs::{self, File, Metadata};
+use std::fs::{self, File, Metadata, TryLockError};
+use std::io;
 use std::os::macos::fs::MetadataExt as _;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::MetadataExt as _;
@@ -314,6 +315,8 @@ pub(crate) struct FileSkips {
 pub(crate) enum Indexed {
     /// Cargo is building: one of its lock files is held by another process.
     InUse { lock: PathBuf },
+    /// A lock file couldn't be opened or locked for another reason.
+    Unreadable { path: PathBuf, error: io::Error },
     /// The directory was indexed while holding cargo's locks.
     Ready {
         files: Vec<FileEntry>,
@@ -340,10 +343,14 @@ pub(crate) fn index(dir: &Path, opts: &IndexOptions, now: SystemTime) -> Indexed
         if !path.is_file() {
             continue;
         }
-        match File::open(&path).map(|f| f.try_lock().map(|()| f)) {
-            Ok(Ok(file)) => locks.push(file),
-            // Held by cargo, or can't even be opened: leave the directory alone.
-            _ => return Indexed::InUse { lock: path },
+        let file = match File::open(&path) {
+            Ok(file) => file,
+            Err(error) => return Indexed::Unreadable { path, error },
+        };
+        match file.try_lock() {
+            Ok(()) => locks.push(file),
+            Err(TryLockError::WouldBlock) => return Indexed::InUse { lock: path },
+            Err(TryLockError::Error(error)) => return Indexed::Unreadable { path, error },
         }
     }
 

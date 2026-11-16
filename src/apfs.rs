@@ -193,3 +193,43 @@ pub(crate) fn volume_space(path: &Path) -> Option<(PathBuf, u64)> {
     let mount = PathBuf::from(OsStr::from_bytes(mount.to_bytes()));
     Some((mount, st.f_bavail * u64::from(st.f_bsize)))
 }
+
+/// Raises this process's soft limit on open files to the most macOS allows.
+///
+/// Shells default to 256, which a run over many build directories exceeds:
+/// it holds cargo's lock files open while hashing in parallel.
+pub(crate) fn raise_open_file_limit() {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `limit` is valid for writes.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) } != 0 {
+        return;
+    }
+    // `setrlimit` rejects soft limits above `kern.maxfilesperproc`.
+    let mut per_process: libc::c_int = 0;
+    let mut len = size_of::<libc::c_int>();
+    // SAFETY: the name is NUL-terminated and `per_process`/`len` describe a
+    // valid buffer for the integer this sysctl returns.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            c"kern.maxfilesperproc".as_ptr(),
+            (&raw mut per_process).cast(),
+            &raw mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    let per_process = if rc == 0 {
+        u64::try_from(per_process).unwrap_or(0)
+    } else {
+        10_240
+    };
+    let target = limit.rlim_max.min(per_process);
+    if target > limit.rlim_cur {
+        limit.rlim_cur = target;
+        // SAFETY: `limit` is a valid `rlimit`. Failure leaves the old limit.
+        unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit) };
+    }
+}

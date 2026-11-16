@@ -159,3 +159,44 @@ fn skips_recently_modified_and_locked_files() {
     assert_eq!(left_alone(&report, "file locked by another process"), 1);
     assert_eq!(inode(&a), before);
 }
+
+/// Runs the binary through `sh` after `ulimit <limit_args>`.
+fn run_with_ulimit(root: &Path, limit_args: &str, args: &str) -> String {
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg(format!("ulimit {limit_args} && exec \"$0\" {args} \"$1\""))
+        .arg(env!("CARGO_BIN_EXE_osx-cargo-dedupe"))
+        .arg(root)
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// Shells default to 256 open files; holding cargo's locks for many build
+/// directories must not exhaust that and be mistaken for running builds.
+#[test]
+fn many_build_directories_with_a_low_open_file_limit() {
+    let tmp = tempfile::tempdir().unwrap();
+    for i in 0..40 {
+        profile_dir(tmp.path(), &format!("w{i}"), &contents(1));
+    }
+
+    let report = run_with_ulimit(tmp.path(), "-Sn 64", "--apply");
+    assert_eq!(row(&report, "Build directories"), "40", "{report}");
+    assert_eq!(row(&report, "Files replaced"), "39", "{report}");
+
+    // When the limit can't be raised, failures are reported as errors, not as
+    // directories cargo is building in.
+    let tmp = tempfile::tempdir().unwrap();
+    for i in 0..40 {
+        profile_dir(tmp.path(), &format!("w{i}"), &contents(1));
+    }
+    let report = run_with_ulimit(tmp.path(), "-n 24", "--apply");
+    assert_eq!(row(&report, "Build directories"), "40", "{report}");
+    assert_eq!(
+        left_alone(&report, "build directories cargo is building in"),
+        0
+    );
+}
